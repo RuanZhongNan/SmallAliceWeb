@@ -509,3 +509,107 @@ peer 依赖对照：v2 要求 `element-plus ^2.9.7`、`vue ^3.5.17`；仓库为 
 2. 不 fork vepx 源码：定制一律通过 wrapper 组件、slot、ConfigProvider themeOverrides、CSS 变量前缀实现。
 3. 升级与功能解耦：升级本身是独立 P0 任务，回归通过后才允许叠加新功能开发。
 4. tree-shaking：ai-vue 构建保持按需引入 vepx 组件，避免全量注册。
+
+---
+
+## 十、后端路线修订的前端配套需求 [新增]
+
+### 10.1 背景与职责边界
+
+[重调研报告](../2026-09-05-inkeep-agents-local-research-report.md) 1.3 节记录了用户的四条路线约束（不做多轮、不接 MCP、模型切换 P0、单轮回流 P2）。修订后路线中落在**前端侧**的配套义务归入本章，范围覆盖 `@ruan-cat-drill-doc/ai-vue` 与 `ai-vitepress-plugins` 两包：
+
+- **前端职责**：页面上下文采集与透传、provider 无关的契约稳定性、客户端响应元数据事件、反馈与回流关联。
+- **前端不做什么**：不做历史注入语义与多轮 UI、不接 MCP、不实现任何工具执行能力；后端事项（模型注册表泛化、qa_records、评估钩子）在 `ai-rag-api` 侧另行立项。
+
+### 10.2 需求一：页面上下文采集与透传
+
+- [ ] `ai-vitepress-plugins` 的 `useKnowledgeChat` 新增页面上下文采集（基于 VitePress `useData`/`useRoute`），随 `/v1/chat` 请求体发送 `pageContext` 字段（至少含 `pagePath`、`title`）
+- [ ] 采集契约与后端 zod schema 对齐；字段缺失或为空时后端跳过注入（对齐 inkeep `requiredToFetch` 的降级语义），前端不因采集失败阻断提问
+- [ ] SSR 安全：服务端渲染期间返回 `undefined`，不访问 `document`
+- [ ] **ai-vue 零改动判定**：聊天传输由 `useKnowledgeChat`（`@ai-sdk/vue` useChat）驱动，`AiChat.vue` 仅 emit 消息，故 `AiChatProps` 不新增上下文 prop，避免职责越界
+
+验收标准：
+
+- [ ] 在文档页 A 提问「这个怎么配」，后端收到的请求体携带页面 A 的 pageContext
+- [ ] 非文档环境（纯 Vue）下采集函数返回空，请求照常发送
+
+### 10.3 需求二：provider 无关的前端契约稳定性
+
+- [ ] 后端切换模型 provider（修订路线 P0）时，前端渲染、来源数据帧、事件行为完全不变
+- [ ] 前端消费面清单化：梳理 AiChat 依赖的全部流式帧与事件类型，vitest 断言不依赖任何上游 SSE 事件名（与 openspec chat-api Requirement 8 的「下游流格式保持稳定」对齐）
+- [ ] 视觉验证矩阵（plan 第十二章）新增「切换 provider 后回归」场景
+
+验收标准：
+
+- [ ] mock 双 provider 场景下 vitest 全绿；agent-browser 视觉验证在 provider 切换前后截图判读一致
+
+### 10.4 需求三：客户端响应元数据与 TTFT 事件
+
+- [ ] `useKnowledgeChat` 记录首 chunk 到达时间（客户端感知 TTFT），作为后端分 provider TTFT 记录的用户侧交叉验证
+- [ ] 并入 plan 4.6 事件系统（`useChatEvents`）：新增 `response-metadata` 事件（携带 `provider`/`model`/`ttftMs`，字段以后端 data-stream 元数据帧实际提供为准），现有消费方不受影响
+
+验收标准：
+
+- [ ] `response-metadata` 事件包含 `ttftMs` 且在现有用例中不破坏既有 emit 契约
+
+### 10.5 需求四：conversationId 追溯语义与反馈关联
+
+- [ ] `conversationId` 语义固化为「单轮问答的追溯分组标识」，仅用于日志、回流评估与外部系统回链，不携带历史注入语义
+- [ ] 默认值保持向后兼容（现默认 `"knowledge-chat"`）；宿主可传入页面级会话 ID（如 `pagePath + 会话种子`）提升回流粒度
+- [ ] plan 4.4 反馈组件（AiChatFeedback）的 emit 载荷增加 `conversationId` 与 `messageId`，供后端 `qa_records` 关联用户反馈信号
+
+验收标准：
+
+- [ ] 反馈事件载荷可唯一定位一条问答记录；现有 API 无破坏性变更
+
+### 10.6 约束
+
+1. 不新增运行时依赖；上下文采集使用 VitePress/Vue 已有 API。
+2. 所有新增字段均为可选，向后兼容现有 `AiChatProps`/`AiChatEmits` 与 `useKnowledgeChat` 签名。
+3. SSR 安全：任何新增采集不得在服务端访问浏览器 API。
+4. 不引入多轮会话语义、不接 MCP（用户约束，见 10.1）。
+
+---
+
+## 十一、ContextConfig 动态上下文系统改造需求 [新增]
+
+### 11.1 背景与借鉴对象
+
+重调研报告第三章 3.3 节确认了 inkeep `agents-core` 的动态上下文三件套（证据见探索笔记 A）：
+
+1. **ContextConfig**（`agents-core/src/context/ContextConfig.ts:396-447`）：`fetchDefinition` 声明式拉取配置，携带 `timeout` 与 `requiredToFetch`（必需变量无法解析则**跳过该次拉取**，非必需上下文失败不阻断主流程）。
+2. **类型化上下文变量**：每个上下文变量绑定独立 zod schema，类型安全直达 prompt。
+3. **TemplateEngine**（`agents-core/src/context/TemplateEngine.ts:86-94`）：`{{variable.path}}` 变量渲染进 prompt。
+
+我们的现状：system prompt 硬编码在 `ai-rag-api/server/contracts/chat.ts:129`；无任何动态上下文；客户端来源（pageContext）的采集与透传已在 spec 10.2 / plan 14.2（FC-1）设计完毕。**本章定义动态上下文的完整改造需求，以后端（ai-rag-api）为主**，定位裁剪遵循 1.3 约束：单轮、无 MCP、web RAG——采用 inkeep 的机制形状，不引入其平台。
+
+### 11.2 目标形态：三层结构
+
+| 层  | 名称                            | v1 内容                                                                                                                                       | 来源拍板  |
+| :-- | :------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------- | :-------- |
+| 1   | 上下文来源（ContextSource）     | `client`（pageContext，由 FC-1 透传）+ `static`（站点名/版本常量）；服务端 `fetchDefinition` 执行器**只定义类型接口不实现**（Q1 拍板，YAGNI） | plan 15.8 |
+| 2   | 类型化上下文容器（ChatContext） | 全字段 zod 校验；`PageContext` schema 放 `@ruan-cat-drill-doc/ai-rag-core` 两端共用（D3 拍板）                                                | plan 15.3 |
+| 3   | 函数式 prompt 模板              | `buildSystemPrompt(ctx, sources)` 五段式：角色设定 / 检索引导 / 引用格式 / 页面上下文注入段（条件渲染）/ 拒答策略（Q2/D2a 拍板）              | plan 15.5 |
+
+**降级语义（borrow 自 requiredToFetch）**：任一上下文来源缺失、非法或失败时，跳过该来源并回退基础模板，**问答永不因上下文问题而失败**。v1 所有来源皆可选，无「必需上下文」场景，`requiredToFetch` 等价物仅在类型注释中预留。
+
+### 11.3 与既有章节及规格的关系
+
+- 客户端采集在前端侧（spec 10.2 / plan 14.2），本章不重复；本章只定义后端的容器、模板与接线。
+- prompt 段落化后，`[来源N]` 引用格式与「根据现有资料无法回答」的对外行为**保持不变**（openspec chat-api Requirement 1 行为不变、组装方式变）。
+- **spec 纪律前置**：chat-api spec Requirement 1 的组装描述需先以 openspec change 修订合入，才允许动 `contracts/chat.ts` 代码。
+
+### 11.4 验收标准
+
+- [ ] 在文档页 A 提问「这个怎么配」，回答针对页面 A（FC-1 采集 + 注入段联动）
+- [ ] pageContext 缺失或非法时，使用基础模板正常回答，无报错无重试
+- [ ] 修改提示词只需改模板模块，`contracts/chat.ts` 的请求处理逻辑无需改动
+- [ ] vitest 覆盖：模板渲染两态快照（有/无 pageContext）、来源归一化三态（合法/非法/缺失）、既有 chat 用例全绿
+- [ ] 来源数据帧契约与流式行为零破坏
+
+### 11.5 约束
+
+1. 不做多轮会话语义、不接 MCP（沿用 1.3 用户约束）；上下文为单轮、无状态、全部可选。
+2. 不新增运行时依赖（zod 已有；不引入 JMESPath——函数式模板不需要）。
+3. 所有新增请求字段可选，向后兼容现有 `/v1/chat` 契约。
+4. 四项关键决策（Q1 范围 / Q2 载体 / Q3 字段最小集 / Q4 独立注入段）按推荐默认拍板，备选方案与推翻成本记录于 plan 15.8 蓝军拷问记录，用户可随时推翻。

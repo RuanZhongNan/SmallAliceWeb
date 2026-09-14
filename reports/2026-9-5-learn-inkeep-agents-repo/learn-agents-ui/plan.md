@@ -1201,6 +1201,27 @@ import { mountAiChat, AiChat } from "@ruan-cat-drill-doc/ai-vue";
 | P4-5 | 更新 index.ts 导出新组件    | 修改 `ai-vue/src/index.ts`       | SidebarChat/ModalChat 可导入 |
 | P4-6 | 编写 mountAiChat 单元测试   | `ai-vue/src/tests/mount.test.ts` | 挂载/卸载/事件传递正常       |
 
+### FC：路线配套任务（随后端修订路线分期，详见第十四章）
+
+| 编号 | 任务                         | 产出                           | 验收                               |
+| :--- | :--------------------------- | :----------------------------- | :--------------------------------- |
+| FC-1 | 页面上下文采集与透传         | 修改 `ai-vitepress-plugins`    | 请求体携带 pageContext，后端可注入 |
+| FC-2 | provider 无关契约回归矩阵    | vitest 矩阵 + 第十二章场景扩展 | 切换 provider 后前端全绿           |
+| FC-3 | 客户端 TTFT 与响应元数据事件 | 扩展 4.6 事件系统              | response-metadata 含 ttftMs        |
+| FC-4 | 反馈载荷关联 conversationId  | 扩展 4.4 反馈组件              | 载荷可关联后端 qa_records          |
+| FC-5 | conversationId 追溯语义固化  | 修改 `useKnowledgeChat`        | 向后兼容、无多轮语义               |
+
+### CC：ContextConfig 动态上下文改造任务（后端为主，详见第十五章）
+
+| 编号 | 任务                                        | 产出                                 | 验收                |
+| :--- | :------------------------------------------ | :----------------------------------- | :------------------ |
+| CC-0 | openspec change 修订 chat-api Requirement 1 | openspec 变更包                      | spec 修订先行合入   |
+| CC-1 | PageContext 共享契约                        | `ai-rag-core` page-context schema    | 两端 typecheck 通过 |
+| CC-2 | ChatContext 与来源归一化                    | `ai-rag-api` context/types + sources | 归一化三态单测通过  |
+| CC-3 | 函数式 prompt 模板                          | `context/prompt-template.ts`         | 渲染两态快照通过    |
+| CC-4 | 接线 contracts/chat.ts                      | 修改 `chat.ts:129` 硬编码段          | 既有 chat 用例全绿  |
+| CC-5 | vitest 覆盖降级路径                         | context 模块测试文件                 | 全量通过            |
+
 ---
 
 ## 七、风险与缓解
@@ -2623,3 +2644,303 @@ v2 提供官方主题入口（dist 实测类型）：`ConfigProviderProps { name
 - [ ] 空状态 `Bubble`、消息列表 `#content`/`#footer` 渲染回归通过
 - [ ] `ConfigProvider` 主题通道生效，P1 落地时色板直接可注入
 - [ ] vitest 全量通过（更新 vepx mock 以匹配 v2 导出面）
+
+---
+
+## 十四、后端路线修订的前端配套实施方案 [新增]
+
+> 2026-09-05 新增。依据[重调研报告](../2026-09-05-inkeep-agents-local-research-report.md)第四章修订路线与 spec 第十章：前端只做配套义务（采集/透传/契约稳定/反馈关联），后端事项（模型注册表泛化、qa_records、评估钩子）在 `ai-rag-api` 侧另行立项 openspec change。
+
+### 14.1 分工边界
+
+| 后端路线项（ai-rag-api）             | 前端配套任务                                 | 所在包                              | 优先级 |
+| :----------------------------------- | :------------------------------------------- | :---------------------------------- | :----- |
+| 模型更换与切换（P0）                 | FC-2 provider 无关契约回归矩阵               | ai-vue + ai-vitepress-plugins 测试  | P0     |
+| prompt 配置化 + 页面上下文注入（P1） | FC-1 页面上下文采集与透传                    | ai-vitepress-plugins                | P1     |
+| TTFT 可观测（P1 横切）               | FC-3 客户端 TTFT 与 response-metadata 事件   | ai-vitepress-plugins + 4.6 事件系统 | P1     |
+| 单轮回流评估（P2）                   | FC-4 反馈载荷关联 + FC-5 conversationId 语义 | 4.4 反馈组件 + useKnowledgeChat     | P2     |
+
+### 14.2 FC-1：页面上下文采集与透传
+
+`useKnowledgeChat` 现签名（实测 `ai-vitepress-plugins/src/client/composables/useKnowledgeChat.ts:92`）：`useKnowledgeChat(conversationId = "knowledge-chat", options)`。扩展示意：
+
+```ts
+import type { PageContext } from "../types";
+
+/** 采集当前文档页上下文；SSR 或非文档环境返回 undefined，请求照常发送。 */
+function collectPageContext(): PageContext | undefined {
+	if (typeof window === "undefined") return undefined;
+	const route = useRoute();
+	const { frontmatter, title } = useData();
+	if (!route?.path) return undefined;
+	return {
+		pagePath: route.path,
+		title: typeof title.value === "string" ? title.value : undefined,
+		keywords: Array.isArray(frontmatter.value?.keywords) ? frontmatter.value.keywords : undefined,
+	};
+}
+```
+
+实施要点：
+
+- [ ] 在 `ai-vitepress-plugins` 定义 `PageContext` 类型（`pagePath` 必填，`title`/`keywords` 可选），与后端 zod schema 字段一一对应
+- [ ] 请求体新增可选 `pageContext` 字段；后端校验失败或字段为空时跳过注入（`requiredToFetch` 降级语义），前端不重试、不阻断
+- [ ] **ai-vue 零改动**：传输在 plugins 层，`AiChatProps` 不新增上下文 prop（spec 10.2 判定）
+- 验证：`pnpm --filter @ruan-cat-drill-doc/ai-vitepress-plugins run test` 全绿；真实文档页提问「这个怎么配」，后端日志可见 pageContext
+
+### 14.3 FC-2：provider 无关契约回归矩阵
+
+- [ ] 清单化 AiChat 消费的全部流式帧与事件（文本流、来源帧、错误态、abort），形成「前端消费面」表格
+- [ ] vitest 断言：mock 传输层在两种 provider 假设（不同上游事件命名）下，前端解析结果一致 —— 对齐 openspec chat-api Requirement 8「下游流格式保持稳定」
+- [ ] 第十二章视觉验证流程的场景表新增一行「切换 provider 后回归」：同一 URL 在 provider A/B 下分别执行默认主题、主题色切换、暗色模式三场景截图判读
+- 验证：`pnpm --filter @ruan-cat-drill-doc/ai-vue run test` 全绿；视觉验证报告（12.3 模板）记录两次判读一致
+
+### 14.4 FC-3：客户端 TTFT 与 response-metadata 事件
+
+- [ ] `useKnowledgeChat` 内以自定义 fetch 包装记录 `firstChunkAt - requestStart = ttftMs`
+- [ ] 4.6 事件系统（`useChatEvents`）新增 `response-metadata` 事件类型：
+
+```ts
+/** 响应元数据事件：由后端 data-stream 元数据帧与客户端 TTFT 测量合成。 */
+export interface AiChatResponseMetadataEvent {
+	type: "response-metadata";
+	provider?: string;
+	model?: string;
+	/** 客户端感知的首 chunk 延迟（毫秒）；与后端分 provider TTFT 交叉验证。 */
+	ttftMs: number;
+	conversationId: string;
+}
+```
+
+- [ ] 现有 emit 契约不变：`response-metadata` 为新增事件类型，旧消费方忽略即可
+- 验证：事件在 mock 与真实传输下均触发；`ttftMs` 数值合理（> 0）
+
+### 14.5 FC-4：反馈载荷关联 conversationId
+
+- [ ] 4.4 反馈组件（AiChatFeedback）emit 载荷扩展为：
+
+```ts
+/** 反馈事件载荷：可唯一定位一条问答记录，供后端 qa_records 关联。 */
+export interface AiChatFeedbackPayload {
+	conversationId: string;
+	messageId: string;
+	rating: "positive" | "negative";
+	comment?: string;
+}
+```
+
+- [ ] 后端回流评估（P2）将用户反馈作为评估信号之一；前端只保证载荷完备
+- 验证：反馈用例断言载荷字段完整
+
+### 14.6 FC-5：conversationId 追溯语义固化
+
+- [ ] `useKnowledgeChat` 保持默认值 `"knowledge-chat"` 向后兼容；文档注释明确「仅作追溯分组标识，不携带历史注入语义」
+- [ ] 宿主可传页面级会话 ID 提升回流粒度（示例：`docs/getting-started#s-3f9a`，即 `pagePath + 会话种子`）；种子由宿主自行管理（sessionStorage 或路由状态），ai-vue/plugins 不强制实现
+- [ ] 全链路检查：该 ID 出现在请求体、日志、后端 qa_records 与评估运行中，形成 3.4 所述的「对话 ↔ 外部系统」回链
+- 验证：向后兼容用例（不传 ID 行为不变）+ 文档注释就位
+
+### 14.7 实施顺序
+
+| 顺序 | 任务                     | 依赖              | 对应后端项                 |
+| :--- | :----------------------- | :---------------- | :------------------------- |
+| 1    | FC-2 契约回归矩阵        | 无（纯测试侧）    | 模型切换 P0 先行验收的一半 |
+| 2    | FC-1 页面上下文采集      | 后端 zod 契约定稿 | prompt 配置化 P1           |
+| 3    | FC-3 TTFT 与元数据事件   | 4.6 事件系统实施  | TTFT 横切 P1               |
+| 4    | FC-5 conversationId 语义 | 无                | 单轮回流 P2                |
+| 5    | FC-4 反馈载荷            | 4.4 反馈组件实施  | 单轮回流 P2                |
+
+### 14.8 验收标准
+
+- [ ] 页面上下文用例通过：文档页提问「这个怎么配」回答针对当前页
+- [ ] 切换 provider 后 vitest 与视觉验证全绿（12.3 报告模板记录）
+- [ ] `response-metadata` 事件含 `ttftMs` 且旧消费方零感知
+- [ ] 反馈载荷含 `conversationId`/`messageId`，可与后端 `qa_records` 关联
+- [ ] 全部新增字段可选，现有 `AiChatProps`/`AiChatEmits`/`useKnowledgeChat` 签名向后兼容，无多轮 UI、无 MCP 依赖
+
+---
+
+## 十五、ContextConfig 动态上下文改造实施方案 [新增]
+
+> 2026-09-05 新增。落地 spec 第十一章：借鉴 inkeep ContextConfig/TemplateEngine 的机制形状（证据：探索笔记 A），按「单轮、无 MCP、web RAG」裁剪。前端采集侧（FC-1，plan 14.2）已就绪，本章以后端 ai-rag-api 为主。
+
+### 15.1 文件变更预览
+
+```plain
+packages/ai-rag-core/src/
+└── page-context.ts                  # 新增：PageContext zod schema（两端共用契约）
+packages/ai-rag-api/server/
+├── context/
+│   ├── types.ts                     # 新增：ChatContext / ContextSource / ServerFetchDefinition（类型预留）
+│   ├── sources.ts                   # 新增：来源归一化与装配
+│   └── prompt-template.ts           # 新增：buildSystemPrompt 五段式函数式模板
+└── contracts/chat.ts                # 修改：第 129 行硬编码 prompt → buildSystemPrompt 调用；请求 schema 增加可选 pageContext
+```
+
+### 15.2 前置步骤：openspec change 修订 chat-api spec
+
+- [ ] 以 openspec change 修订 chat-api Requirement 1 的描述：由「基于检索到的上下文（Top-5）组装 system prompt」扩为「由类型化上下文与模板模块组装 system prompt，页面上下文可选注入、缺失时降级」
+- [ ] 行为验收（来源帧、`[来源N]`、拒答文案、流式契约）保持不变
+- 纪律：spec 是唯一事实源，spec 修订合入后才允许动 `contracts/chat.ts`
+
+### 15.3 任务 CC-1：PageContext 共享契约（ai-rag-core）
+
+```ts
+// packages/ai-rag-core/src/page-context.ts
+import { z } from "zod";
+
+/** 客户端页面上下文契约：ai-vitepress-plugins 采集、ai-rag-api 校验共用同一份 schema。 */
+export const pageContextSchema = z.object({
+	/** 用户当前浏览的文档页路径，如 /guide/install。 */
+	pagePath: z.string().min(1).max(512),
+	/** 页面标题（可选）。 */
+	title: z.string().max(256).optional(),
+});
+
+export type PageContext = z.infer<typeof pageContextSchema>;
+```
+
+- [ ] `ai-vitepress-plugins` 增加 `"@ruan-cat-drill-doc/ai-rag-core": "workspace:*"` 依赖，FC-1 的采集类型改为引用该 schema 推导类型
+- 验证：两包子包 `typecheck` 通过
+
+### 15.4 任务 CC-2：ChatContext 容器与来源归一化（types.ts + sources.ts）
+
+```ts
+// packages/ai-rag-api/server/context/types.ts
+import type { PageContext } from "@ruan-cat-drill-doc/ai-rag-core";
+
+/** 单轮聊天的动态上下文容器：任一来源可选，缺失仅降级不阻断。 */
+export interface ChatContext {
+	/** 客户端页面上下文（FC-1 透传）。 */
+	page?: PageContext;
+	/** 静态站点信息。 */
+	site: { name: string };
+}
+
+/**
+ * 服务端拉取式上下文定义（v2 预留，v1 不实现执行器）。
+ * 对齐 inkeep fetchDefinition 形状：url + zod 校验 + timeout + requiredToFetch 跳过语义。
+ * 第一个真实拉取场景出现时实现，接口不变。
+ */
+export interface ServerFetchDefinition {
+	url: string;
+	schema: import("zod").ZodTypeAny;
+	timeoutMs?: number;
+	requiredToFetch?: boolean;
+}
+```
+
+```ts
+// packages/ai-rag-api/server/context/sources.ts
+import { pageContextSchema } from "@ruan-cat-drill-doc/ai-rag-core";
+import type { ChatContext } from "./types";
+
+/** 归一化客户端页面上下文：合法返回值，非法或缺失返回 undefined（永不抛错）。 */
+export function normalizeClientContext(input: unknown): PageContext | undefined {
+	const parsed = pageContextSchema.safeParse(input);
+	return parsed.success ? parsed.data : undefined;
+}
+
+/** 装配单轮聊天上下文：来源逐个归一化，失败跳过。 */
+export function assembleChatContext(rawPageContext: unknown, siteName: string): ChatContext {
+	const context: ChatContext = { site: { name: siteName } };
+	const page = normalizeClientContext(rawPageContext);
+	if (page) context.page = page;
+	return context;
+}
+```
+
+- 验证：归一化三态单测（合法 / 非法 / 缺失）
+
+### 15.5 任务 CC-3：函数式 prompt 模板（prompt-template.ts）
+
+```ts
+// packages/ai-rag-api/server/context/prompt-template.ts
+import type { PageContext } from "@ruan-cat-drill-doc/ai-rag-core";
+import type { ChatContext } from "./types";
+
+/** 角色设定段。 */
+export const ROLE_SEGMENT = "你是知识库问答助手。根据以下参考资料回答问题。";
+
+/** 检索引导段。 */
+export const RETRIEVAL_GUIDE_SEGMENT = "回答必须依据参考资料；资料未覆盖的内容不要编造。";
+
+/** 引用格式段。 */
+export const CITATION_FORMAT_SEGMENT = "回答中每个观点标注来源 [来源N]，N 对应参考资料编号。";
+
+/** 拒答策略段。 */
+export const REFUSAL_POLICY_SEGMENT = "如果资料不足，说明「根据现有资料无法回答」。";
+
+/** 页面上下文注入段：独立段落 + 防误引声明，防止模型把页面信息误标为 [来源N]。 */
+export function buildPageContextSegment(page: PageContext): string {
+	const lines = [
+		"【页面上下文】以下信息仅作语境参考，不得作为来源引用，不计入 [来源N] 编号：",
+		`- 用户当前浏览页面：${page.pagePath}`,
+	];
+	if (page.title) lines.push(`- 页面标题：${page.title}`);
+	return lines.join("\n");
+}
+
+/** 组装 system prompt：五段式，页面上下文存在时才渲染注入段。 */
+export function buildSystemPrompt(context: ChatContext, sources: string[]): string {
+	const segments = [
+		ROLE_SEGMENT,
+		RETRIEVAL_GUIDE_SEGMENT,
+		CITATION_FORMAT_SEGMENT,
+		context.page ? buildPageContextSegment(context.page) : null,
+		`参考资料：\n${sources.map((source, index) => `[${index + 1}] ${source}`).join("\n\n")}`,
+		REFUSAL_POLICY_SEGMENT,
+	].filter((segment): segment is string => segment !== null);
+	return segments.join("\n\n");
+}
+```
+
+- [ ] 五个段落常量独立导出，便于单测与未来按渠道差异化
+- [ ] 对外行为与现实现逐字对齐（除新增的页面上下文段外），保证 openspec 行为验收不变
+- 验证：有/无 pageContext 两态渲染快照
+
+### 15.6 任务 CC-4：接线 contracts/chat.ts
+
+- [ ] `chatRequestSchema` 增加可选 `pageContext` 字段（引用 ai-rag-core 的 schema）
+- [ ] 第 129 行硬编码段替换为：
+
+```ts
+const context = assembleChatContext(parsed.data.pageContext, SITE_NAME);
+const system = buildSystemPrompt(
+	context,
+	sources.map((source) => source.content),
+);
+```
+
+- [ ] 来源帧、abort 传播、错误映射逻辑零改动
+- 验证：现有 chat 用例全绿；新增「携带合法 pageContext 的集成用例」断言 system 含页面路径
+
+### 15.7 任务 CC-5：vitest 覆盖
+
+- [ ] `prompt-template` 渲染两态快照（有/无 pageContext）
+- [ ] `sources` 归一化三态（合法 / 非法 / 缺失）
+- [ ] 降级路径：非法 pageContext → 基础模板输出、无异常抛出
+- 运行：`pnpm --filter @ruan-cat-drill-doc/ai-rag-api run test`
+
+### 15.8 蓝军拷问记录（grill-me 自审：推荐默认已执行，均可推翻）
+
+| 拷问                                           | 结论                                                                                                     | 推翻成本                                               |
+| :--------------------------------------------- | :------------------------------------------------------------------------------------------------------- | :----------------------------------------------------- |
+| Q1 为何 v1 不实现服务端 fetchDefinition 执行器 | 无真实拉取场景（文档元数据已在检索结果内，页面信息由客户端透传），YAGNI；类型接口已预留                  | 场景出现后约 1 天，接口不变                            |
+| Q2 为何 TS 函数式模板而非字符串模板 + 渲染器   | prompt 不入库、无可视化编辑器；函数模板类型安全、零解析层。inkeep 用字符串模板是因 prompt 可被构建器存库 | 未来 prompt 上库时切换载体，buildSystemPrompt 签名不变 |
+| Q3 为何字段最小集（pagePath + title）          | 足够支撑「这个怎么配」指代消解；字段越多校验与隐私面越大                                                 | 加字段 = schema + 采集 + 模板三处小改                  |
+| Q4 为何独立注入段 + 防误引声明                 | 防止模型把页面信息当作来源标注 [来源 N]，污染引用编号体系                                                | 换注入方式 = 改一个段落函数                            |
+| D3 为何 PageContext schema 放 ai-rag-core      | api 已依赖该包（workspace:\*，chat.ts:1 已在用）；plugins 加一条 workspace 依赖换取两端契约不漂移        | 挪包 = 移文件 + 改 import                              |
+| 上下文会不会演化成「隐形多轮」                 | 不会：单轮、无状态、全部可选、任何来源失败只降级不阻塞                                                   | —                                                      |
+
+### 15.9 实施顺序与验收标准
+
+实施顺序：openspec change（15.2）→ CC-1 → CC-2 → CC-3 → CC-4 → CC-5；前端 FC-1（plan 14.2）与 CC-1 的 schema 定稿并行。
+
+验收标准：
+
+- [ ] openspec chat-api spec 修订先行合入
+- [ ] 文档页 A 提问「这个怎么配」，回答针对页面 A（FC-1 联动联调用例）
+- [ ] pageContext 缺失或非法时基础模板回答、无报错
+- [ ] 提示词修改只触碰模板模块，`contracts/chat.ts` 请求处理逻辑不变
+- [ ] `pnpm --filter @ruan-cat-drill-doc/ai-rag-api run test` 全量通过
+- [ ] 四项拍板决策（Q1-Q4）在 15.8 有记录，用户可随时推翻重拍
