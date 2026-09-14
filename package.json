@@ -5,7 +5,7 @@
 	"homepage": "https://drill.ruan-cat.com",
 	"private": true,
 	"type": "module",
-	"packageManager": "pnpm@10.29.2",
+	"packageManager": "pnpm@12.4.1",
 	"engines": {
 		"node": "22.x"
 	},

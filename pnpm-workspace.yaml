@@ -1,8 +1,14 @@
-onlyBuiltDependencies:
-  - "@parcel/watcher"
-  - better-sqlite3
-  - esbuild
-  - sharp
+allowBuilds:
+  "@parcel/watcher": true
+  "@playwright/browser-chromium": true
+  "@swc/core": true
+  better-sqlite3: true
+  esbuild: true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
+  simple-git-hooks: true
+  vue-demi: true
 
 packages:
   - "scripts/*"
