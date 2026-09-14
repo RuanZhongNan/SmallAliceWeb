@@ -20,16 +20,12 @@ jobs:
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v6
-      - name: 安装 pnpm
-        uses: pnpm/action-setup@v5
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@c9883cc79df532ad1a7b81bf9ab944ceb090d65c # v2.0.0
         with:
-          version: 10.29.2
-      - name: 配置 Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22.x
-      - name: 启用 Corepack
-        run: corepack enable
+          runtime: node@22
+          cache: true
+          install: false
       - name: 安装依赖
         run: pnpm install --no-frozen-lockfile
       - name: 记录构建前内存
