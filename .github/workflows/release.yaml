@@ -34,9 +34,6 @@ jobs:
           cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
-      - name: corepack手动再安装一次pnpm
-        run: corepack enable && corepack install
-
       - name: 从 CHANGELOG.md 提取内容并创建 GitHub Release
         if: github.ref_type == 'tag'
         run: |
